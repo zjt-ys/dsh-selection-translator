@@ -18,20 +18,21 @@ DeepSeek Harness (DSH) Web GUI 插件：选中文本一键翻译为中文。
 
 ## 安装
 
-使用 CLI 安装到 web profile：
+使用 CLI 从 GitHub 安装：
 
 ```bash
-# 克隆仓库
-git clone https://github.com/zjt-ys/dsh-selection-translator.git
+dsh plugin add github:zjt-ys/dsh-selection-translator
+```
 
-# 安装到 DSH web profile
-dsh plugin --profile web add ./dsh-selection-translator
+或安装本地目录（本地路径必须是绝对路径）：
 
-# 或指定绝对路径
-dsh plugin --profile web add file:E:\工作区\dsh-selection-translator
+```bash
+dsh plugin add "file:E:/工作区/dsh-selection-translator"
 ```
 
 也可在 DSH 图形界面安装：`插件管理 → 安装本地包 → 选择本目录`。
+
+安装后在插件管理中启用，聊天输入框右侧会出现翻译按钮。
 
 ## 技术细节
 
