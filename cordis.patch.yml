@@ -1,0 +1,3 @@
+- insert:
+    - id: selection-translator
+      name: '@local/selection-translator'

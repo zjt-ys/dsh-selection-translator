@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Selection Translator",
+    "description": "Select text in the chat and click the translate button to translate it into Chinese via the Index-Translate API."
+  }
+}

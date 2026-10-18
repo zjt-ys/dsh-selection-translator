@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "选中文本翻译",
+    "description": "在聊天中选中文本，点击翻译按钮，通过 Index-Translate API 翻译为中文并显示在浮窗中。"
+  }
+}
