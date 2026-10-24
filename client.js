@@ -5,44 +5,28 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const { useState, useCallback, useRef, useEffect } = React;
 
-    // Package-private JSON RPC to our Host half (avoids browser CORS).
-    // The Host makes the actual API call from Node.js and returns the result.
+    // Package-private JSON RPC to our Host half. The Host owns every network
+    // call: it tries several free channels in order and splits long input to
+    // fit each channel's own limit. Running it on the Host side also avoids
+    // browser CORS restrictions.
     let host;
     try { host = require('host'); } catch { host = null; }
 
-    // ── Fallback: direct browser fetch (may hit CORS) ─────────────
-    const API_URL = 'https://index-translate.bilibili.com/v1/chat/completions';
-    const API_MODEL = 'Index-Translate-35B-A3B';
+    /** Hard cap mirroring the Host half, so oversized selections fail fast. */
+    const MAX_TOTAL = 20000;
 
-    async function translateViaFetch(text, signal) {
-      const resp = await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: API_MODEL,
-          messages: [{
-            role: 'user',
-            content: '请将以下文本翻译为中文，直接输出翻译结果，不要进行任何解释。\n\n' + text,
-          }],
-        }),
-        signal,
-      });
-      if (!resp.ok) throw new Error(`API 返回错误 ${resp.status}: ${resp.statusText}`);
-      const data = await resp.json();
-      const result = data?.choices?.[0]?.message?.content;
-      if (!result) throw new Error('API 返回了空结果');
-      return result.trim();
-    }
-
-    async function translateText(text, signal) {
-      if (host) {
-        // Host-side RPC — no CORS issues
-        const r = await host.call('translate', { text });
-        if (r?.error) throw new Error(r.error);
-        return r.result;
+    /**
+     * Ask the Host half to translate.
+     * @returns {Promise<{ result: string, channel?: string, chunks?: number }>}
+     */
+    async function translateText(text) {
+      if (!host) {
+        throw new Error('翻译服务不可用：Host 端未加载。请重新启用插件或重启 Harness。');
       }
-      // Fallback: direct fetch (may fail due to CORS)
-      return translateViaFetch(text, signal);
+      const r = await host.call('translate', { text });
+      if (r?.error) throw new Error(r.error);
+      if (!r?.result) throw new Error('翻译服务返回了空结果。');
+      return r;
     }
 
     // ── Icons ──────────────────────────────────────────────────────
@@ -86,7 +70,7 @@ window.__ModuleLoader__.load({
     }
 
     // ── Floating Overlay Component ─────────────────────────────────
-    function TranslateOverlay({ result, loading, error, originalText, onClose }) {
+    function TranslateOverlay({ result, loading, error, originalText, channel, chunks, onClose }) {
       const [showOriginal, setShowOriginal] = useState(false);
       const [copied, setCopied] = useState(false);
 
@@ -183,10 +167,15 @@ window.__ModuleLoader__.load({
             }, result),
           ),
           !loading && h('div', { style: footerStyle },
-            h('button', {
-              style: btnStyle,
-              onClick: () => setShowOriginal(!showOriginal),
-            }, showOriginal ? '隐藏原文' : '查看原文'),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+              h('button', {
+                style: btnStyle,
+                onClick: () => setShowOriginal(!showOriginal),
+              }, showOriginal ? '隐藏原文' : '查看原文'),
+              result && channel && h('span', {
+                style: { color: 'var(--dsh-color-text-tertiary, #6c7086)' },
+              }, chunks > 1 ? `${channel} · ${chunks} 段` : channel),
+            ),
             h('div', { style: { display: 'flex', gap: '8px' } },
               result && h('button', { style: btnStyle, onClick: handleCopy },
                 h(CopyIcon), copied ? '已复制' : '复制'),
@@ -211,11 +200,14 @@ window.__ModuleLoader__.load({
     // ── Main Button Component ──────────────────────────────────────
     function TranslateButton() {
       const [overlay, setOverlay] = useState(null);
-      const abortRef = useRef(null);
+      const aliveRef = useRef(true);
+
+      useEffect(() => {
+        aliveRef.current = true;
+        return () => { aliveRef.current = false; };
+      }, []);
 
       const handleTranslate = useCallback(() => {
-        if (abortRef.current) abortRef.current.abort();
-
         const selection = window.getSelection();
         const text = selection ? selection.toString().trim() : '';
 
@@ -227,41 +219,36 @@ window.__ModuleLoader__.load({
           });
           return;
         }
-        if (text.length > 10000) {
+        if (text.length > MAX_TOTAL) {
           setOverlay({
             loading: false,
-            error: `选中文本过长（${text.length} 字符），请选择不超过 10000 字符的内容。`,
+            error: `选中文本过长（${text.length} 字符），单次最多 ${MAX_TOTAL} 字符。`,
             result: null, original: '',
           });
           return;
         }
 
-        const ac = new AbortController();
-        abortRef.current = ac;
         setOverlay({ loading: true, error: null, result: null, original: text });
 
-        translateText(text, ac.signal)
-          .then((result) => {
-            setOverlay({ loading: false, error: null, result, original: text });
+        translateText(text)
+          .then((r) => {
+            if (!aliveRef.current) return;
+            setOverlay({
+              loading: false, error: null,
+              result: r.result, channel: r.channel, chunks: r.chunks,
+              original: text,
+            });
           })
           .catch((err) => {
-            if (err.name === 'AbortError') return;
-            let msg = err.message || String(err);
-            if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
-              msg = '网络请求失败。由于浏览器跨域限制(CORS)，直连 API 可能不可用。\n插件已通过 Host 端代理调用，如仍失败请检查网络连接。';
-            }
-            setOverlay({ loading: false, error: msg, result: null, original: text });
+            if (!aliveRef.current) return;
+            setOverlay({
+              loading: false, error: err.message || String(err),
+              result: null, original: text,
+            });
           });
       }, []);
 
-      const handleClose = useCallback(() => {
-        if (abortRef.current) abortRef.current.abort();
-        setOverlay(null);
-      }, []);
-
-      useEffect(() => {
-        return () => { if (abortRef.current) abortRef.current.abort(); };
-      }, []);
+      const handleClose = useCallback(() => { setOverlay(null); }, []);
 
       const btnStyle = {
         background: 'none', border: 'none',
@@ -288,6 +275,7 @@ window.__ModuleLoader__.load({
         overlay && h(TranslateOverlay, {
           result: overlay.result, loading: overlay.loading,
           error: overlay.error, originalText: overlay.original,
+          channel: overlay.channel, chunks: overlay.chunks,
           onClose: handleClose,
         }),
       );
