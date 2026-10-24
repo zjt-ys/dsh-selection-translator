@@ -5,28 +5,137 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const { useState, useCallback, useRef, useEffect } = React;
 
-    // Package-private JSON RPC to our Host half. The Host owns every network
-    // call: it tries several free channels in order and splits long input to
-    // fit each channel's own limit. Running it on the Host side also avoids
-    // browser CORS restrictions.
+    // Package-private JSON RPC to our Host half. The Host owns the full
+    // channel list and is the preferred path because it avoids CORS entirely.
     let host;
     try { host = require('host'); } catch { host = null; }
 
     /** Hard cap mirroring the Host half, so oversized selections fail fast. */
     const MAX_TOTAL = 20000;
 
+    // ── Browser-side fallback channels ───────────────────────────────
+    // A browser can only reach endpoints that send permissive CORS headers,
+    // so this list is deliberately shorter than the Host's. It exists so the
+    // plugin still translates when the Host half is not loaded. The logic
+    // mirrors translate-core.js, which the Host half uses.
+    const BROWSER_CHANNELS = [
+      {
+        id: 'mymemory',
+        label: 'MyMemory',
+        maxChars: 480,
+        async request(text) {
+          const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+          const looksChinese = cjk / Math.max(1, text.length) > 0.3;
+          const pair = looksChinese ? 'zh-CN|en' : 'en|zh-CN';
+          const url = 'https://api.mymemory.translated.net/get?q='
+            + encodeURIComponent(text) + '&langpair=' + encodeURIComponent(pair);
+          const resp = await fetch(url);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+          const out = data?.responseData?.translatedText;
+          if (!out) throw new Error('空结果');
+          // MyMemory reports failures as translated text, not a status code.
+          if (/QUERY LENGTH LIMIT EXCEEDED|INVALID SOURCE LANGUAGE|INVALID TARGET LANGUAGE|MYMEMORY WARNING/i.test(out)) {
+            throw new Error(out.slice(0, 80));
+          }
+          return out.trim();
+        },
+      },
+    ];
+
+    /** Split text into chunks no longer than `limit`, preferring natural breaks. */
+    function splitText(text, limit) {
+      const chunks = [];
+      let rest = text;
+      while (rest.length > limit) {
+        const window = rest.slice(0, limit);
+        let cut = -1;
+        cut = window.lastIndexOf('\n\n');
+        if (cut > limit * 0.3) {
+          chunks.push(rest.slice(0, cut));
+          rest = rest.slice(cut).replace(/^\n+/, '');
+          continue;
+        }
+        const sentenceRe = /[。！？；.!?;]\s*/g;
+        let m;
+        let lastEnd = -1;
+        while ((m = sentenceRe.exec(window)) !== null) lastEnd = m.index + m[0].length;
+        if (lastEnd > limit * 0.3) {
+          chunks.push(rest.slice(0, lastEnd));
+          rest = rest.slice(lastEnd);
+          continue;
+        }
+        cut = window.lastIndexOf('\n');
+        if (cut > limit * 0.3) {
+          chunks.push(rest.slice(0, cut));
+          rest = rest.slice(cut).replace(/^\n+/, '');
+          continue;
+        }
+        cut = window.lastIndexOf(' ');
+        if (cut > limit * 0.3) {
+          chunks.push(rest.slice(0, cut));
+          rest = rest.slice(cut + 1);
+          continue;
+        }
+        chunks.push(window);
+        rest = rest.slice(limit);
+      }
+      if (rest.trim()) chunks.push(rest);
+      return chunks.filter((c) => c.trim());
+    }
+
     /**
-     * Ask the Host half to translate.
+     * Translate with the Host half first, then fall back to a direct browser
+     * request. The Host path is preferred because it is not limited by CORS.
      * @returns {Promise<{ result: string, channel?: string, chunks?: number }>}
      */
     async function translateText(text) {
-      if (!host) {
-        throw new Error('翻译服务不可用：Host 端未加载。请重新启用插件或重启 Harness。');
+      const attempts = [];
+
+      if (host) {
+        try {
+          const r = await host.call('translate', { text });
+          if (r?.error) throw new Error(r.error);
+          if (!r?.result) throw new Error('Host 端返回了空结果');
+          return r;
+        } catch (err) {
+          attempts.push(`Host 端: ${err?.message || String(err)}`);
+        }
+      } else {
+        attempts.push('Host 端: 未加载');
       }
-      const r = await host.call('translate', { text });
-      if (r?.error) throw new Error(r.error);
-      if (!r?.result) throw new Error('翻译服务返回了空结果。');
-      return r;
+
+      // Fallback: CORS-friendly channels straight from the browser.
+      const failures = [];
+      for (const channel of BROWSER_CHANNELS) {
+        const chunks = splitText(text, channel.maxChars);
+        const parts = [];
+        let failed = false;
+        for (let i = 0; i < chunks.length; i += 1) {
+          try {
+            parts.push(await channel.request(chunks[i]));
+          } catch (err) {
+            failures.push(`${channel.id}: ${err?.message || String(err)}`);
+            failed = true;
+            break;
+          }
+          if (i < chunks.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 400));
+          }
+        }
+        if (!failed && parts.length === chunks.length && parts.length > 0) {
+          return {
+            result: parts.join('\n\n'),
+            channel: channel.label,
+            chunks: chunks.length,
+          };
+        }
+      }
+
+      throw new Error(
+        '翻译失败，所有路径均不可用。\n' + attempts.join('\n')
+        + (failures.length ? '\n' + failures.join('\n') : ''),
+      );
     }
 
     // ── Icons ──────────────────────────────────────────────────────

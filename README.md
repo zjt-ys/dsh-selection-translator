@@ -48,7 +48,8 @@ dsh plugin --profile web add "file:E:/工作区/dsh-selection-translator"
 
 ## 技术细节
 
-- **Host 端** (`index.js`)：三通道降级 + 智能分段，通过 `host.call` RPC 暴露给 Client，同时绕过浏览器 CORS 限制
-- **Client 端** (`client.js`)：翻译按钮 + 浮窗 UI，注册在 `conversation.input.right` 插槽
+- **双路径架构**：优先走 Host 端 RPC（`host.call`，无 CORS 限制）；Host 半不可用时自动降级为浏览器直连，两种路径都能完成翻译
+- **Host 端** (`index.js` + `translate-core.js`)：三通道降级 + 智能分段
+- **Client 端** (`client.js`)：翻译按钮 + 浮窗 UI，注册在 `conversation.input.right` 插槽；内置 CORS 友好的 MyMemory 通道作为直连兜底
 - **分段策略**：段落分隔 → 句末标点 → 单换行 → 空格 → 硬切，保证不丢字符
 - **降级策略**：逐通道尝试，失败自动切下一个；全部失败时回报每通道的具体原因
